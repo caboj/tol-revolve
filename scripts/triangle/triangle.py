@@ -3,6 +3,7 @@ import os
 import sys
 import logging
 import argparse
+import math
 
 from revolve.build.util import in_cm, in_mm
 from revolve.util import Time
@@ -11,7 +12,7 @@ from pygazebo.pygazebo import DisconnectError
 from trollius.py33_exceptions import ConnectionResetError, ConnectionRefusedError
 
 # Add "tol" directory to Python path
-sys.path.append(os.path.dirname(os.path.abspath(__file__))+'/../')
+sys.path.append(os.path.dirname(os.path.abspath(__file__))+'/../../')
 
 # Trollius / Pygazebo
 import trollius
@@ -27,23 +28,55 @@ from tol.config import parser
 from tol.manage import World
 from tol.logging import logger, output_console
 from revolve.util import multi_future
+from tol.triangle_of_life import Food_Grid, Population, RobotAccount
 
 # Log output to console
 output_console()
 logger.setLevel(logging.DEBUG)
 
 
-parser.add_argument("-s", "--seed", default=-1, help="Supply a random seed", type=int)
 parser.add_argument("-n", "--num-initial-bots", default=3,
                     help="Number of initial bots", type=int)
 parser.add_argument("-f", "--fast", help="Short reproduction wait.",
                     action="store_true")
 
+
+parser.add_argument(
+    '--robot-file',
+    type=str,
+    help="path to file containing robot morphology description in YAML format"
+)
+
+parser.add_argument(
+    '--brain-genotype-file',
+    type=str,
+    default=None,
+    help="path to file containing brain genotype description in YAML format"
+)
+
+
 parent_color = (1, 0, 0, 0.5)
 child_color = (0, 1, 0, 0.5)
-insert_z = 1.5
 
 
+# initial food density
+init_food_density = 2000
+
+
+#time before robots die
+init_life_time = 20
+
+#bonus life time per food item
+time_per_food = 10
+
+# food density grid:
+food_field = Food_Grid(xmin=-10, ymin=-10, xmax=10, ymax=10, xresol=100, yresol=100, value=init_food_density)
+
+# maximum mating distance:
+mating_distance = 2
+
+# maximum matings per robot:
+max_mates_per_robot = 9999
 
 
 
@@ -71,70 +104,6 @@ def sleep_sim_time(world, seconds, state_break=[False]):
 
 
 
-def pick_position(conf):
-    """
-
-    :param conf:
-    :param z: z height of the returned vector
-    :return:
-    """
-    margin = in_cm(40)
-    x_min, x_max = -margin/2, margin/2
-    y_min, y_max = -margin/2, margin/2
-
-    x = random.uniform(x_min, x_max)
-    y = random.uniform(y_min, y_max)
-    return Vector3(x, y, insert_z)
-
-
-
-@trollius.coroutine
-def spawn_population(world, conf):
-    """
-    :param world:
-    :type world: World
-    :return:
-    """
-    poses = [Pose(position=pick_position(conf)) for _ in range(1)]
-    trees, bboxes = yield From(world.generate_population(len(poses)))
-
-
-    fut = yield From(world.insert_population(trees, poses))
-    yield From(fut)
-
-
-
-@trollius.coroutine
-def cleanup(world, max_bots=10, remove_from=5):
-    """
-    Removes the slowest of the oldest `remove_from` robots from
-    the world if there are more than `max_bots`
-    :param world:
-    :type world: World
-    :return:
-    """
-    if len(world.robots) <= max_bots:
-        return
-
-    logger.debug("Automatically removing the slowest of the oldest %d robots..." % remove_from)
-
-    # Get the oldest `num` robots
-    robots = sorted(world.robot_list(), key=lambda r: r.age(), reverse=True)[:remove_from]
-
-    # Get the slowest robot
-    slowest = sorted(robots, key=lambda r: r.velocity())[0]
-
-
-    # Delete it from the world
-    fut = yield From(world.delete_robot(slowest))
-    yield From(trollius.sleep(1))
-    yield From(fut)
-
-
-
-
-
-
 @trollius.coroutine
 def run_server(conf):
     """
@@ -147,53 +116,84 @@ def run_server(conf):
     conf.min_parts = 1
     conf.max_parts = 3
     conf.arena_size = (3, 3)
+    conf.max_lifetime = 99999
+    conf.initial_age_mu = 99999
+    conf.initial_age_sigma = 1
+    conf.age_cutoff = 99999
 
- #   interactive = [True]
+    conf.pose_update_frequency = 20
 
+    # initial population size:
+    init_pop_size = conf.num_initial_bots
+
+
+    # initialize world:
     world = yield From(World.create(conf))
-    yield From(world.pause(True))
+    yield From(world.pause(False))
 
-    start_bots = conf.num_initial_bots
-    poses = [Pose(position=pick_position(conf)) for _ in range(start_bots)]
 
-    trees, bboxes = yield From(world.generate_population(len(poses)))
+    print "WORLD CREATED"
 
-    fut = yield From(world.insert_population(trees, poses))
-    yield From(fut)
+    # robot accounts:
+    accounts = Population(init_life_time = init_life_time, food_field = food_field,
+                          mating_distance = mating_distance, time_per_food = time_per_food,
+                          world = world)
 
-    # List of reproduction requests
-    reproduce = []
 
     # Request callback for the subscriber
     def callback(data):
         req = Request()
         req.ParseFromString(data)
-       
-
-        if req.request == "produce_offspring":
-            reproduce.append(req.data.split("+++"))
 
 
     subscriber = world.manager.subscribe(
         '/gazebo/default/request', 'gazebo.msgs.Request', callback)
     yield From(subscriber.wait_for_connection())
 
+
+    # open files with body and brain descriptions:
+    with open(conf.robot_file,'r') as robot_file:
+        bot_yaml = robot_file.read()
+
+    brain_genotype_yaml = None
+
+    # if brain genotype file exists:
+    if conf.brain_genotype_file != '':
+        with open (conf.brain_genotype_file, 'r') as gen_file:
+            brain_genotype_yaml = gen_file.read()
+
+
+    # spawn initial population of robots:
+    yield From(accounts.spawn_initial_given_robots(conf, init_pop_size, bot_yaml, brain_genotype_yaml))
+
     yield From(world.pause(False))
+    print "WORLD UNPAUSED"
 
+    deltaT = 0.01
+
+    # run loop:
     while True:
-        yield From(spawn_population(world, conf))
+        # detect food acquisition:
+        for account in accounts:
+            yield From(account.update())
 
-        yield From(trollius.sleep(12))
-        yield From(cleanup(world))
 
+        # reproduce:
+        parents = accounts.find_mate_pairs()
+        yield From(accounts.reproduce(parents))
+
+        # remove dead robots:
+        yield From(accounts.cleanup())
+
+        yield From(trollius.sleep(deltaT))
 
 
 
 def main():
+
+    print "START"
+
     args = parser.parse_args()
-    seed = random.randint(1, 1000000) if args.seed < 0 else args.seed
-    random.seed(seed)
-    print("Seed: %d" % seed)
 
     def handler(loop, context):
         exc = context['exception']
@@ -203,10 +203,25 @@ def main():
 
         raise context['exception']
 
+
+
     try:
+
         loop = trollius.get_event_loop()
+
+        loop.set_debug(enabled=True)
+#        logging.basicConfig(level=logging.DEBUG)
+
         loop.set_exception_handler(handler)
         loop.run_until_complete(run_server(args))
+
+        # run = run_server(args)
+        # run.next()
+        # while True:
+        #     run.next()
+
+        print "FINISH"
+
     except KeyboardInterrupt:
         print("Got Ctrl+C, shutting down.")
     except ConnectionRefusedError:

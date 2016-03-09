@@ -7,31 +7,23 @@
     <link name="ground">
       <collision name="ground_col">
         <geometry>
-          <mesh><uri>model://tol_env/meshes/arena.dae</uri></mesh>
+          <mesh>
+            <uri>model://tol_env/meshes/double_floor_col.dae</uri>
+            <scale>20.0 20.0 20.0</scale>
+          </mesh>
         </geometry>
       </collision>
       <visual name="ground_vis">
         <cast_shadows>false</cast_shadows>
         <geometry>
-          <mesh><uri>model://tol_env/meshes/arena.dae</uri></mesh>
+          <mesh>
+            <uri>model://tol_env/meshes/double_floor_vis.dae</uri>
+            <scale>20.0 20.0 20.0</scale>
+          </mesh>
         </geometry>
       </visual>
     </link>
 
-
-    <link name="clinic">
-      <collision name="clinic_col">
-        <geometry>
-          <mesh><uri>model://tol_env/meshes/birth_clinic2.dae</uri></mesh>
-        </geometry>
-      </collision>
-      <visual name="clinic_vis">
-        <cast_shadows>false</cast_shadows>
-        <geometry>
-          <mesh><uri>model://tol_env/meshes/birth_clinic2.dae</uri></mesh>
-        </geometry>
-      </visual>
-    </link>
   </model>
 <!-- END Test mesh -->
 </sdf>
